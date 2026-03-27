@@ -24,12 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "canopen_types.h"
-#include "abstraction_layer.h"
-#include "nmt.h"
-#include "heartbeat.h"
-#include "sdo.h"
-#include "pdo.h"
+#include "CANopen_driver.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -78,11 +74,10 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 /* USER CODE BEGIN PV */
 CAN_TxHeaderTypeDef TxHeader; // Отвечает за отправку кадров
 CAN_RxHeaderTypeDef RxHeader; // Для принятых кадров
-uint8_t TxData[8] = {0}; // Полезные данные которые хотим передать
-uint8_t RxData[8] = {0}; // Полезные данные из принятого кадра
+uint8_t TxData[8] = {0, }; // Полезные данные которые хотим передать
+uint8_t RxData[8] = {0, }; // Полезные данные из принятого кадра
 uint32_t TxMailbox = 0;
-uint8_t node_id_mcu = 5; // ID STM32F767ZI
-uint32_t last_heartbeat = 0;
+char trans_str[64];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,7 +94,32 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+// Колбек для приёма данных
+// Если чё добавить мигание светиком
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+	if(HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
+		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 
+		if(RxHeader.StdId == 0x0378) {
+			snprintf(trans_str, 128, "ID %04lX %d\n", RxHeader.StdId, RxData[0]);
+			HAL_UART_Transmit(&huart3, (uint8_t*)trans_str, strlen(trans_str), 100);
+		}
+		else if(RxHeader.StdId == 0x0126) {
+			snprintf(trans_str, 128, "ID %04lX %d\n", RxHeader.StdId, RxData[0]);
+			HAL_UART_Transmit(&huart3, (uint8_t*)trans_str, strlen(trans_str), 100);
+		}
+	}
+}
+
+// Колбек для ошибок
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *hcan)
+{
+	uint32_t er = HAL_CAN_GetError(hcan);
+	sprintf(trans_str, "ER CAN %lu %08lX", er, er);
+	HAL_UART_Transmit(&huart3, (uint8_t*)trans_str, strlen(trans_str), 100);
+	HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+}
 /* USER CODE END 0 */
 
 /**
@@ -110,7 +130,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -139,33 +158,61 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
-  // Инициализируем наш слой абстракции (он настроит фильтры и запустит CAN1)
-  can_init("can1");
+  TxHeader.StdId = 0x0378;
+  TxHeader.ExtId = 0;
+  TxHeader.RTR = CAN_RTR_DATA;
+  TxHeader.IDE = CAN_ID_STD;
+  TxHeader.DLC = 8;
+  TxHeader.TransmitGlobalTime = 0;
 
-  uint8_t epos_node_id = 1; // Допустим, у EPOS2 установлен ID = 1
-  CAN_Frame my_frame;
+  for (uint8_t i = 0; i < 8; i++) {
+	TxData[i] = (i + 10);
+  }
+  HAL_CAN_Start(&hcan1);
+  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_ERROR | CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE);
 
-  // Отправляем NMT команду запуска EPOS2
-  NMT_CreateCommand(&my_frame, NMT_CS_START, epos_node_id);
-  can_send(0, &my_frame);
+  CO_ReturnError_t err = co_driver_init(&hcan1, 500, 1);
+  if (err != CO_ERROR_NO)
+	  printf("CANopen driver init failed. Error: %d\n", err);
+  else
+	  printf("CANopen driver initialized successfully!\n");
 
-  // Переменная для таймера Heartbeat (чтобы Мастер сам слал Heartbeat)
-  uint32_t last_tick = HAL_GetTick();
+  uint8_t slaveNodeId = 2; // ID EPOS2
+  uint16_t index = 0x1008; // Manufacturer Device Name
+  uint8_t subIndex = 0x00;
+  uint8_t responseBuffer[30] = {0};
+  uint32_t responseLen = 0;
+  CO_SDO_return_t sdo_ret;
 
-  //  HAL_CAN_ConfigFilter(&hcan1, &canfilterconfig);
-  //  HAL_CAN_Start(&hcan1);
-  //  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_ERROR | CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE);
+  printf("Attempting SDO read...\n");
+
+  sdo_ret = CO_SDOclient_read_sync(CO->SDOclient, slaveNodeId, index, subIndex,
+                                   responseBuffer, sizeof(responseBuffer), &responseLen);
+
+  if(sdo_ret == CO_SDO_RT_ok) {
+      // Убираем непечатаемые символы, если они есть
+      for(int i=0; i<responseLen; i++) {
+          if(responseBuffer[i] < ' ') responseBuffer[i] = '.';
+      }
+      printf("SDO Read SUCCESS! Length: %lu, Data: %s\n", responseLen, responseBuffer);
+  } else {
+      printf("SDO Read FAILED with abort code: 0x%08X\n", sdo_ret);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
-
   /* USER CODE BEGIN WHILE */
+  uint32_t last_tick = HAL_GetTick();
   while (1)
   {
-	// Приём сообщений от EPOS2
+	  uint32_t current_tick = HAL_GetTick();
+	      uint32_t time_diff_ms = current_tick - last_tick;
 
-
-
+	      // Вместо вашего HAL_CAN_AddTxMessage(...) теперь будет это:
+	      if (time_diff_ms > 0) { // Вызываем обработчик раз в миллисекунду
+	          last_tick = current_tick;
+	          co_driver_process(time_diff_ms * 1000); // Передаем время в микросекундах
+	      }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
