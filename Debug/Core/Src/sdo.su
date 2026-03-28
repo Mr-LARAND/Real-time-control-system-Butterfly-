@@ -1,0 +1,2 @@
+../Core/Src/sdo.c:11:6:SDO_Create_Read_Request	16	static
+../Core/Src/sdo.c:30:5:SDO_Parse_Response	32	static

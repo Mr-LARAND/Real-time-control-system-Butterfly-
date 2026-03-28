@@ -1,0 +1,2 @@
+../Core/Src/heartbeat.c:3:5:Heartbeat_Parse	4
+../Core/Src/heartbeat.c:18:13:NMT_Print_State	7

@@ -1,0 +1,2 @@
+../Core/Src/pdo.c:4:6:PDO_Create_RxPDO	32	static
+../Core/Src/pdo.c:28:5:PDO_Parse_TxPDO	24	static

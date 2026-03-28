@@ -30,6 +30,7 @@
 #include "heartbeat.h"
 #include "sdo.h"
 #include "pdo.h"
+#include "epos2.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -145,8 +146,14 @@ int main(void)
   uint8_t epos_node_id = 1; // Допустим, у EPOS2 установлен ID = 1
   CAN_Frame my_frame;
 
+  // Инициализируем EPOS2 с ID = 1
+  if (EPOS2_Init(epos_node_id) == 0)
+	  HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
+   else
+	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+
   // Отправляем NMT команду запуска EPOS2
-  NMT_CreateCommand(&my_frame, NMT_CS_START, epos_node_id);
+  NMT_Create_Command(&my_frame, NMT_OPERATIONAL, epos_node_id);
   can_send(0, &my_frame);
 
   // Переменная для таймера Heartbeat (чтобы Мастер сам слал Heartbeat)
@@ -163,9 +170,32 @@ int main(void)
   while (1)
   {
 	// Приём сообщений от EPOS2
+	  CAN_Frame rx_frame;
+	  if (can_receive(0, &rx_frame) > 0) {
+	       uint8_t pdo_num, node_id, data_len;
+	       uint8_t data[8];
 
+	       // Проверяем, не Statusword ли это прилетел (TxPDO)
+	       if (PDO_Parse_TxPDO(&rx_frame, &pdo_num, &node_id, data, &data_len)) {
+	         // Здесь можно реагировать на статус мотора
+	       }
+	  }
 
+	  // 2. Отправка Heartbeat Мастера (например, ID=5) раз в секунду
+	  if (HAL_GetTick() - last_tick >= 1000) {
+		  my_frame.id = 0x700 + 5;
+		  my_frame.dlc = 1;
+		  my_frame.data[0] = 0x05; // Operational
+	  	  my_frame.rtr = 0;
+	  	  can_send(0, &my_frame);
 
+	      last_tick = HAL_GetTick();
+	  }
+
+	  // Теперь, когда мотор включен можно отправлять ему задания скорости
+	  // этот код мы напишу когда будет EPOS2
+
+	  HAL_Delay(100);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

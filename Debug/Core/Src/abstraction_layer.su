@@ -1,0 +1,4 @@
+../Core/Src/abstraction_layer.c:9:5:can_init	56	static
+../Core/Src/abstraction_layer.c:33:5:can_send	48	static
+../Core/Src/abstraction_layer.c:53:5:can_receive	48	static
+../Core/Src/abstraction_layer.c:71:6:can_close	16	static

@@ -1,0 +1,2 @@
+../Core/Src/epos2.c:17:13:SDO_CreateWriteRequest	16	static
+../Core/Src/epos2.c:45:5:EPOS2_Init	48	static

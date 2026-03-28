@@ -1,13 +1,8 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <errno.h>
 #include <stm32f7xx_hal.h>
 
 #include "abstraction_layer.h"
 
-CAN_HandleTypeDef hcan1; // !!! Возможно нужно будет добавить extern
+extern CAN_HandleTypeDef hcan1; // !!! Возможно нужно будет добавить extern
 
 /* !!! УБРАТЬ У ФУНКЦИЙ ПАРАМЕТРЫ (Если будет время :) )!!!*/
 
@@ -26,7 +21,7 @@ int can_init(const char *ifname)
     sFilterConfig.FilterActivation = ENABLE;
     sFilterConfig.SlaveStartFilterBank = 14;
 
-    if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAK_OK)
+    if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAL_OK)
     	return -1;
 
     if (HAL_CAN_Start(&hcan1) != HAL_OK)
