@@ -140,63 +140,106 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
-  // Инициализируем наш слой абстракции (он настроит фильтры и запустит CAN1)
   can_init("can1");
+  uint8_t epos_node_id = 1;
+  CAN_Frame my_frame = {0};
 
-  uint8_t epos_node_id = 1; // Допустим, у EPOS2 установлен ID = 1
-  CAN_Frame my_frame;
+  // ВАЖНО: Ждем 2 секунды, пока EPOS2 полностью не загрузится после включения питания!
+  HAL_Delay(2000);
 
-  // Инициализируем EPOS2 с ID = 1
-  if (EPOS2_Init(epos_node_id) == 0)
-	  HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
-   else
-	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+  if (EPOS2_Init(epos_node_id) == 0) { HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin); }
+  else { HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); }
 
-  // Отправляем NMT команду запуска EPOS2
+  // 1. Переводим EPOS в Operational
   NMT_Create_Command(&my_frame, NMT_OPERATIONAL, epos_node_id);
   can_send(0, &my_frame);
+  HAL_Delay(50);
 
-  // Переменная для таймера Heartbeat (чтобы Мастер сам слал Heartbeat)
-  uint32_t last_tick = HAL_GetTick();
+  CAN_Frame sdo_frame = {0};
+  sdo_frame.id = 0x600 + epos_node_id;
+  sdo_frame.dlc = 8;
 
-  //  HAL_CAN_ConfigFilter(&hcan1, &canfilterconfig);
-  //  HAL_CAN_Start(&hcan1);
-  //  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_ERROR | CAN_IT_BUSOFF | CAN_IT_LAST_ERROR_CODE);
+  // 2. Режим Profile Velocity (0x6060 = 3)
+  sdo_frame.data[0] = 0x2F; sdo_frame.data[1] = 0x60; sdo_frame.data[2] = 0x60; sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x03; sdo_frame.data[5] = 0x00; sdo_frame.data[6] = 0x00; sdo_frame.data[7] = 0x00;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // 2.1 Установка Profile Acceleration (0x6083) = 100 (0x00002710)
+  sdo_frame.data[0] = 0x23; // Команда: Запись 4 байт
+  sdo_frame.data[1] = 0x83; // Индекс LSB
+  sdo_frame.data[2] = 0x60; // Индекс MSB
+  sdo_frame.data[3] = 0x00; // Субиндекс
+  sdo_frame.data[4] = 0x64; // 64
+  sdo_frame.data[5] = 0x00; // 00
+  sdo_frame.data[6] = 0x00; // 00
+  sdo_frame.data[7] = 0x00; // 00
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // 2.2 Установка Profile Deceleration (0x6084) = 10000 (0x00002710)
+  sdo_frame.data[1] = 0x84; // Меняем только младший байт индекса на 0x84
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+
+
+
+  // 2.5 Сброс ошибок (Fault Reset): 0x6040 = 0x0080
+  sdo_frame.data[0] = 0x2B; sdo_frame.data[1] = 0x40; sdo_frame.data[2] = 0x60; sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x80; sdo_frame.data[5] = 0x00;
+  can_send(0, &sdo_frame);
+  HAL_Delay(100);
+
+  // 3. Шаг 1: Shutdown (0x6040 = 0x0006)
+  sdo_frame.data[4] = 0x06; sdo_frame.data[5] = 0x00;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // 4. Шаг 2: Switch On (0x6040 = 0x0007)
+  sdo_frame.data[4] = 0x07;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // 5. Шаг 3: Enable Operation (0x6040 = 0x000F)
+  sdo_frame.data[4] = 0x0F;
+  can_send(0, &sdo_frame);
+  HAL_Delay(100);
   /* USER CODE END 2 */
 
   /* Infinite loop */
-
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	// Приём сообщений от EPOS2
-	  CAN_Frame rx_frame;
-	  if (can_receive(0, &rx_frame) > 0) {
-	       uint8_t pdo_num, node_id, data_len;
-	       uint8_t data[8];
+      static int32_t target_velocity = 1000; // Целевая скорость
 
-	       // Проверяем, не Statusword ли это прилетел (TxPDO)
-	       if (PDO_Parse_TxPDO(&rx_frame, &pdo_num, &node_id, data, &data_len)) {
-	         // Здесь можно реагировать на статус мотора
-	       }
-	  }
+      CAN_Frame speed_cmd = {0};
+      speed_cmd.id = 0x600 + epos_node_id; // Пишем через SDO
+      speed_cmd.dlc = 8;
 
-	  // 2. Отправка Heartbeat Мастера (например, ID=5) раз в секунду
-	  if (HAL_GetTick() - last_tick >= 1000) {
-		  my_frame.id = 0x700 + 5;
-		  my_frame.dlc = 1;
-		  my_frame.data[0] = 0x05; // Operational
-	  	  my_frame.rtr = 0;
-	  	  can_send(0, &my_frame);
+      // Формируем SDO команду записи 4 байт (0x23) в регистр 0x60FF (Target Velocity)
+      speed_cmd.data[0] = 0x23;
+      speed_cmd.data[1] = 0xFF; // Индекс LSB (0xFF)
+      speed_cmd.data[2] = 0x60; // Индекс MSB (0x60)
+      speed_cmd.data[3] = 0x00; // Субиндекс
 
-	      last_tick = HAL_GetTick();
-	  }
+      // Записываем скорость (Little Endian)
+      speed_cmd.data[4] = (uint8_t)(target_velocity);
+      speed_cmd.data[5] = (uint8_t)(target_velocity >> 8);
+      speed_cmd.data[6] = (uint8_t)(target_velocity >> 16);
+      speed_cmd.data[7] = (uint8_t)(target_velocity >> 24);
 
-	  // Теперь, когда мотор включен можно отправлять ему задания скорости
-	  // этот код мы напишу когда будет EPOS2
+      can_send(0, &speed_cmd);
 
-	  HAL_Delay(100);
+      // Вращаем мотор 3 секунды в одну сторону
+      HAL_Delay(3000);
+
+      // Меняем направление
+      target_velocity = -target_velocity;
+
     /* USER CODE END WHILE */
+
+
 
     /* USER CODE BEGIN 3 */
   }

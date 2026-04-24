@@ -2,11 +2,11 @@
 
 #include "abstraction_layer.h"
 
-extern CAN_HandleTypeDef hcan1; // !!! Возможно нужно будет добавить extern
+extern CAN_HandleTypeDef hcan1;
 
 /* !!! УБРАТЬ У ФУНКЦИЙ ПАРАМЕТРЫ (Если будет время :) )!!!*/
 
-int can_init(const char *ifname) 
+int can_init(const char *ifname)
 {
 	// Настройка фильтра на приём всех сообщений
     CAN_FilterTypeDef sFilterConfig;
