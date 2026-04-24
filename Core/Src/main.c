@@ -30,7 +30,7 @@
 #include "heartbeat.h"
 #include "sdo.h"
 #include "pdo.h"
-#include "epos2.h"
+//#include "epos2.h" возможно это даже не надо, надо будет протестить
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -147,8 +147,13 @@ int main(void)
   // ВАЖНО: Ждем 2 секунды, пока EPOS2 полностью не загрузится после включения питания!
   HAL_Delay(2000);
 
-  if (EPOS2_Init(epos_node_id) == 0) { HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin); }
-  else { HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); }
+// 	пока это не надо дальше посмотрим
+//  if (EPOS2_Init(epos_node_id) == 0) {
+//	  HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
+//  }
+//  else {
+//	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+//  }
 
   // 1. Переводим EPOS в Operational
   NMT_Create_Command(&my_frame, NMT_OPERATIONAL, epos_node_id);
@@ -181,9 +186,6 @@ int main(void)
   sdo_frame.data[1] = 0x84; // Меняем только младший байт индекса на 0x84
   can_send(0, &sdo_frame);
   HAL_Delay(50);
-
-
-
 
   // 2.5 Сброс ошибок (Fault Reset): 0x6040 = 0x0080
   sdo_frame.data[0] = 0x2B; sdo_frame.data[1] = 0x40; sdo_frame.data[2] = 0x60; sdo_frame.data[3] = 0x00;

@@ -13,7 +13,7 @@
 #include "nmt.h"
 #include "stm32f7xx_hal.h" // Для HAL_Delay
 
-// Вспомогательная функция для SDO-записи (аналог SDO_CreateReadRequest)
+// Создание запроса на запись функция для SDO-записи
 static void SDO_CreateWriteRequest(CAN_Frame *frame, uint8_t node_id, uint16_t index, uint8_t subindex, uint32_t data, uint8_t data_len)
 {
     frame->id = 0x600 + node_id;
@@ -59,9 +59,9 @@ int EPOS2_Init(uint8_t node_id)
     can_send(0, &frame);
     HAL_Delay(50); // Пауза между SDO
 
-    // Пример: Устанавливаем максимальную скорость профиля (например, 3000 об/мин)
+    // Пример: Устанавливаем максимальную скорость профиля (10000 об/мин)
     // Индекс 0x6081, субиндекс 0x00, данные = 3000 (тип UINT32)
-    SDO_CreateWriteRequest(&frame, node_id, 0x6081, 0, 3000, 4);
+    SDO_CreateWriteRequest(&frame, node_id, 0x6081, 0, 10000, 4);
     can_send(0, &frame);
     HAL_Delay(50);
 
