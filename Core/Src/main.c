@@ -18,9 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
-#include <stdio.h>
-#include <stdbool.h>
+#include "lwip.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -49,28 +47,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-#if defined ( __ICCARM__ ) /*!< IAR Compiler */
-#pragma location=0x2007c000
-ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x2007c0a0
-ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __CC_ARM )  /* MDK ARM Compiler */
-
-__attribute__((at(0x2007c000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x2007c0a0))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __GNUC__ ) /* GNU Compiler */
-
-ETH_DMADescTypeDef DMARxDscrTab[ETH_RX_DESC_CNT] __attribute__((section(".RxDecripSection"))); /* Ethernet Rx DMA Descriptors */
-ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecripSection")));   /* Ethernet Tx DMA Descriptors */
-#endif
-
-ETH_TxPacketConfig TxConfig;
-
 CAN_HandleTypeDef hcan1;
-
-ETH_HandleTypeDef heth;
 
 UART_HandleTypeDef huart3;
 
@@ -84,6 +61,8 @@ uint8_t RxData[8] = {0}; // Полезные данные из принятог�
 uint32_t TxMailbox = 0;
 uint8_t node_id_mcu = 5; // ID STM32F767ZI
 uint32_t last_heartbeat = 0;
+int32_t target_velocity = 0;
+uint32_t can_timer = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -91,7 +70,6 @@ void SystemClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CAN1_Init(void);
-static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
@@ -100,7 +78,36 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#include "lwip/udp.h"
+#include <stdlib.h>
+#include <string.h>
 
+// Эта функция автоматически вызывается lwIP, когда прилетает UDP пакет
+void udp_receive_callback(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    if (p != NULL) {
+        // Создаем временный буфер и копируем туда данные из пакета
+        char buffer[32] = {0};
+        uint16_t len = p->len < 31 ? p->len : 31;
+        strncpy(buffer, (char *)p->payload, len);
+
+        // Преобразуем полученный текст (например "-500") в число!
+        target_velocity = atoi(buffer);
+
+        // ОБЯЗАТЕЛЬНО освобождаем память пакета, иначе STM32 зависнет от нехватки памяти
+        pbuf_free(p);
+    }
+}
+
+// Функция запуска нашего сервера
+void udp_server_init(void) {
+    struct udp_pcb *upcb = udp_new(); // Создаем блок управления UDP
+    if (upcb != NULL) {
+        // Слушаем любой IP адрес (наш) и порт 5000
+        udp_bind(upcb, IP_ADDR_ANY, 5000);
+        // Привязываем функцию-коллбэк, которая сработает при приеме пакета
+        udp_recv(upcb, udp_receive_callback, NULL);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -136,10 +143,12 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_CAN1_Init();
-  MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
+  MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
+  udp_server_init();
+
   can_init("can1");
   uint8_t epos_node_id = 1;
   CAN_Frame my_frame = {0};
@@ -212,45 +221,61 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-    {
-        static int32_t target_velocity = 100; // Попробуем чуть меньшую скорость для старта (500 RPM)
-        CAN_Frame cmd_frame = {0};
-        cmd_frame.id = 0x600 + epos_node_id;
-        cmd_frame.dlc = 8;
+  {
+	  MX_LWIP_Process();
 
-        // СНАЧАЛА ПОДТВЕРЖДАЕМ ВКЛЮЧЕНИЕ: Запись 0x000F в Controlword (0x6040)
-        cmd_frame.data[0] = 0x2B; // Запись 2 байт
-        cmd_frame.data[1] = 0x40;
-        cmd_frame.data[2] = 0x60;
-        cmd_frame.data[3] = 0x00;
-        cmd_frame.data[4] = 0x0F;
-        cmd_frame.data[5] = 0x00;
-        cmd_frame.data[6] = 0x00;
-        cmd_frame.data[7] = 0x00;
-        can_send(0, &cmd_frame);
-        HAL_Delay(10);
+	  if (HAL_GetTick() - can_timer >= 100)
+	  {
+		  can_timer = HAL_GetTick();
 
-        // ЗАТЕМ ОТПРАВЛЯЕМ СКОРОСТЬ: Запись Target Velocity (0x60FF)
-        cmd_frame.data[0] = 0x23; // Запись 4 байт
-        cmd_frame.data[1] = 0xFF;
-        cmd_frame.data[2] = 0x60;
-        cmd_frame.data[3] = 0x00;
-        cmd_frame.data[4] = (uint8_t)(target_velocity);
-        cmd_frame.data[5] = (uint8_t)(target_velocity >> 8);
-        cmd_frame.data[6] = (uint8_t)(target_velocity >> 16);
-        cmd_frame.data[7] = (uint8_t)(target_velocity >> 24);
-        can_send(0, &cmd_frame);
+		  CAN_Frame speed_cmd = {0};
+		  speed_cmd.id = 0x600 + epos_node_id;
+		  speed_cmd.dlc = 8;
 
-        // Вращаем мотор 3 секунды в одну сторону
-        HAL_Delay(3000);
-
-        // Меняем направление
-        target_velocity = -target_velocity;
-
-      /* USER CODE END WHILE */
-
-
-
+		  speed_cmd.data[0] = 0x23; // Запись 4 байт
+		  speed_cmd.data[1] = 0xFF;
+		  speed_cmd.data[2] = 0x60;
+		  speed_cmd.data[3] = 0x00;
+		  speed_cmd.data[4] = (uint8_t)(target_velocity);
+		  speed_cmd.data[5] = (uint8_t)(target_velocity >> 8);
+		  speed_cmd.data[6] = (uint8_t)(target_velocity >> 16);
+		  speed_cmd.data[7] = (uint8_t)(target_velocity >> 24);
+		  can_send(0, &speed_cmd);
+	  }
+//        CAN_Frame cmd_frame = {0};
+//        cmd_frame.id = 0x600 + epos_node_id;
+//        cmd_frame.dlc = 8;
+//
+//        // СНАЧАЛА ПОДТВЕРЖДАЕМ ВКЛЮЧЕНИЕ: Запись 0x000F в Controlword (0x6040)
+//        cmd_frame.data[0] = 0x2B; // Запись 2 байт
+//        cmd_frame.data[1] = 0x40;
+//        cmd_frame.data[2] = 0x60;
+//        cmd_frame.data[3] = 0x00;
+//        cmd_frame.data[4] = 0x0F;
+//        cmd_frame.data[5] = 0x00;
+//        cmd_frame.data[6] = 0x00;
+//        cmd_frame.data[7] = 0x00;
+//        can_send(0, &cmd_frame);
+//        HAL_Delay(10);
+//
+//        // ЗАТЕМ ОТПРАВЛЯЕМ СКОРОСТЬ: Запись Target Velocity (0x60FF)
+//        cmd_frame.data[0] = 0x23; // Запись 4 байт
+//        cmd_frame.data[1] = 0xFF;
+//        cmd_frame.data[2] = 0x60;
+//        cmd_frame.data[3] = 0x00;
+//        cmd_frame.data[4] = (uint8_t)(target_velocity);
+//        cmd_frame.data[5] = (uint8_t)(target_velocity >> 8);
+//        cmd_frame.data[6] = (uint8_t)(target_velocity >> 16);
+//        cmd_frame.data[7] = (uint8_t)(target_velocity >> 24);
+//        can_send(0, &cmd_frame);
+//
+//        // Вращаем мотор 3 секунды в одну сторону
+//        HAL_Delay(3000);
+//
+//        // Меняем направление
+//        target_velocity = -target_velocity;
+//
+//    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   }
@@ -355,55 +380,6 @@ static void MX_CAN1_Init(void)
   Error_Handler();
   }
   /* USER CODE END CAN1_Init 2 */
-
-}
-
-/**
-  * @brief ETH Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ETH_Init(void)
-{
-
-  /* USER CODE BEGIN ETH_Init 0 */
-
-  /* USER CODE END ETH_Init 0 */
-
-   static uint8_t MACAddr[6];
-
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
-  heth.Init.TxDesc = DMATxDscrTab;
-  heth.Init.RxDesc = DMARxDscrTab;
-  heth.Init.RxBuffLen = 1524;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
 
 }
 
