@@ -170,13 +170,13 @@ int main(void)
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 2.1 Установка Profile Acceleration (0x6083) = 100 (0x00002710)
+  // 2.1 Установка Profile Acceleration (0x6083) = 1000 (0x00002710)
   sdo_frame.data[0] = 0x23; // Команда: Запись 4 байт
   sdo_frame.data[1] = 0x83; // Индекс LSB
   sdo_frame.data[2] = 0x60; // Индекс MSB
   sdo_frame.data[3] = 0x00; // Субиндекс
-  sdo_frame.data[4] = 0x64; // 64
-  sdo_frame.data[5] = 0x00; // 00
+  sdo_frame.data[4] = 0xE8; // E8
+  sdo_frame.data[5] = 0x03; // 03
   sdo_frame.data[6] = 0x00; // 00
   sdo_frame.data[7] = 0x00; // 00
   can_send(0, &sdo_frame);
@@ -212,34 +212,43 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
-      static int32_t target_velocity = 1000; // Целевая скорость
+    {
+        static int32_t target_velocity = 100; // Попробуем чуть меньшую скорость для старта (500 RPM)
+        CAN_Frame cmd_frame = {0};
+        cmd_frame.id = 0x600 + epos_node_id;
+        cmd_frame.dlc = 8;
 
-      CAN_Frame speed_cmd = {0};
-      speed_cmd.id = 0x600 + epos_node_id; // Пишем через SDO
-      speed_cmd.dlc = 8;
+        // СНАЧАЛА ПОДТВЕРЖДАЕМ ВКЛЮЧЕНИЕ: Запись 0x000F в Controlword (0x6040)
+        cmd_frame.data[0] = 0x2B; // Запись 2 байт
+        cmd_frame.data[1] = 0x40;
+        cmd_frame.data[2] = 0x60;
+        cmd_frame.data[3] = 0x00;
+        cmd_frame.data[4] = 0x0F;
+        cmd_frame.data[5] = 0x00;
+        cmd_frame.data[6] = 0x00;
+        cmd_frame.data[7] = 0x00;
+        can_send(0, &cmd_frame);
+        HAL_Delay(10);
 
-      // Формируем SDO команду записи 4 байт (0x23) в регистр 0x60FF (Target Velocity)
-      speed_cmd.data[0] = 0x23;
-      speed_cmd.data[1] = 0xFF; // Индекс LSB (0xFF)
-      speed_cmd.data[2] = 0x60; // Индекс MSB (0x60)
-      speed_cmd.data[3] = 0x00; // Субиндекс
+        // ЗАТЕМ ОТПРАВЛЯЕМ СКОРОСТЬ: Запись Target Velocity (0x60FF)
+        cmd_frame.data[0] = 0x23; // Запись 4 байт
+        cmd_frame.data[1] = 0xFF;
+        cmd_frame.data[2] = 0x60;
+        cmd_frame.data[3] = 0x00;
+        cmd_frame.data[4] = (uint8_t)(target_velocity);
+        cmd_frame.data[5] = (uint8_t)(target_velocity >> 8);
+        cmd_frame.data[6] = (uint8_t)(target_velocity >> 16);
+        cmd_frame.data[7] = (uint8_t)(target_velocity >> 24);
+        can_send(0, &cmd_frame);
 
-      // Записываем скорость (Little Endian)
-      speed_cmd.data[4] = (uint8_t)(target_velocity);
-      speed_cmd.data[5] = (uint8_t)(target_velocity >> 8);
-      speed_cmd.data[6] = (uint8_t)(target_velocity >> 16);
-      speed_cmd.data[7] = (uint8_t)(target_velocity >> 24);
+        // Вращаем мотор 3 секунды в одну сторону
+        HAL_Delay(3000);
 
-      can_send(0, &speed_cmd);
+        // Меняем направление
+        target_velocity = -target_velocity;
 
-      // Вращаем мотор 3 секунды в одну сторону
-      HAL_Delay(3000);
+      /* USER CODE END WHILE */
 
-      // Меняем направление
-      target_velocity = -target_velocity;
-
-    /* USER CODE END WHILE */
 
 
 
