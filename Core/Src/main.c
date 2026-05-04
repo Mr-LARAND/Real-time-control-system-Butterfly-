@@ -28,7 +28,9 @@
 #include "heartbeat.h"
 #include "sdo.h"
 #include "pdo.h"
-//#include "epos2.h" возможно это даже не надо, надо будет протестить
+#include "lwip/udp.h"
+#include <stdlib.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,6 +65,7 @@ uint8_t node_id_mcu = 5; // ID STM32F767ZI
 uint32_t last_heartbeat = 0;
 int32_t target_velocity = 0;
 uint32_t can_timer = 0;
+uint16_t motor_controlword = 0x000F;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,42 +81,46 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#include "lwip/udp.h"
-#include <stdlib.h>
-#include <string.h>
 
 // Эта функция автоматически вызывается lwIP, когда прилетает UDP пакет
-void udp_receive_callback(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+void udp_receive_callback(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
     if (p != NULL) {
         // Создаем временный буфер и копируем туда данные из пакета
         char buffer[32] = {0};
         uint16_t len = p->len < 31 ? p->len : 31;
         strncpy(buffer, (char *)p->payload, len);
 
-        // Преобразуем полученный текст (например "-500") в число!
-        target_velocity = atoi(buffer);
+        if (strncmp(buffer, "CMD_STOP", 8) == 0) {
+        	motor_controlword = 0x0007; // Состояние "Switch On" (силовая часть выключена)
+            target_velocity = 0;
+        }
+        else if (strncmp(buffer, "CMD_START", 9) == 0) {
+        	motor_controlword = 0x000F; // Состояние "Enable Operation" (силовая часть включена)
+        	target_velocity = 0;
+        }
+        else {
+        	target_velocity = atoi(buffer);
+        	motor_controlword = 0x000F;
+        }
 
-        // ОБЯЗАТЕЛЬНО освобождаем память пакета, иначе STM32 зависнет от нехватки памяти
+        // Освобождаем память пакета, иначе STM32 зависнет от нехватки памяти
         pbuf_free(p);
     }
 }
 
-// Функция запуска нашего сервера
-void udp_server_init(void) {
-    struct udp_pcb *upcb = udp_new(); // Создаем блок управления UDP
+// Ф-я запуска UDP-сервера
+void udp_server_init(void)
+{
+    struct udp_pcb *upcb = udp_new();
     if (upcb != NULL) {
-        // Слушаем любой IP адрес (наш) и порт 5000
+        // Слушаем любой IP адрес и порт 5000
         udp_bind(upcb, IP_ADDR_ANY, 5000);
-        // Привязываем функцию-коллбэк, которая сработает при приеме пакета
         udp_recv(upcb, udp_receive_callback, NULL);
     }
 }
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
 int main(void)
 {
 
@@ -153,18 +160,9 @@ int main(void)
   uint8_t epos_node_id = 1;
   CAN_Frame my_frame = {0};
 
-  // ВАЖНО: Ждем 2 секунды, пока EPOS2 полностью не загрузится после включения питания!
   HAL_Delay(2000);
 
-// 	пока это не надо дальше посмотрим
-//  if (EPOS2_Init(epos_node_id) == 0) {
-//	  HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
-//  }
-//  else {
-//	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
-//  }
-
-  // 1. Переводим EPOS в Operational
+  // Переводим EPOS в Operational
   NMT_Create_Command(&my_frame, NMT_OPERATIONAL, epos_node_id);
   can_send(0, &my_frame);
   HAL_Delay(50);
@@ -228,6 +226,23 @@ int main(void)
 	  {
 		  can_timer = HAL_GetTick();
 
+		  CAN_Frame cmd_frame = {0};
+		  cmd_frame.id = 0x600 + epos_node_id;
+		  cmd_frame.dlc = 8;
+
+		  cmd_frame.data[0] = 0x2B; // Запись 2 байт
+		  cmd_frame.data[1] = 0x40;
+		  cmd_frame.data[2] = 0x60;
+		  cmd_frame.data[3] = 0x00;
+
+		  cmd_frame.data[4] = (uint8_t)(motor_controlword);
+		  cmd_frame.data[5] = (uint8_t)(motor_controlword >> 8);
+		  cmd_frame.data[6] = (uint8_t)(motor_controlword >> 16);
+		  cmd_frame.data[7] = (uint8_t)(motor_controlword >> 24);
+		  can_send(0, &cmd_frame);
+
+		  for(volatile int i = 0; i < 5000; i++);
+
 		  CAN_Frame speed_cmd = {0};
 		  speed_cmd.id = 0x600 + epos_node_id;
 		  speed_cmd.dlc = 8;
@@ -242,40 +257,7 @@ int main(void)
 		  speed_cmd.data[7] = (uint8_t)(target_velocity >> 24);
 		  can_send(0, &speed_cmd);
 	  }
-//        CAN_Frame cmd_frame = {0};
-//        cmd_frame.id = 0x600 + epos_node_id;
-//        cmd_frame.dlc = 8;
-//
-//        // СНАЧАЛА ПОДТВЕРЖДАЕМ ВКЛЮЧЕНИЕ: Запись 0x000F в Controlword (0x6040)
-//        cmd_frame.data[0] = 0x2B; // Запись 2 байт
-//        cmd_frame.data[1] = 0x40;
-//        cmd_frame.data[2] = 0x60;
-//        cmd_frame.data[3] = 0x00;
-//        cmd_frame.data[4] = 0x0F;
-//        cmd_frame.data[5] = 0x00;
-//        cmd_frame.data[6] = 0x00;
-//        cmd_frame.data[7] = 0x00;
-//        can_send(0, &cmd_frame);
-//        HAL_Delay(10);
-//
-//        // ЗАТЕМ ОТПРАВЛЯЕМ СКОРОСТЬ: Запись Target Velocity (0x60FF)
-//        cmd_frame.data[0] = 0x23; // Запись 4 байт
-//        cmd_frame.data[1] = 0xFF;
-//        cmd_frame.data[2] = 0x60;
-//        cmd_frame.data[3] = 0x00;
-//        cmd_frame.data[4] = (uint8_t)(target_velocity);
-//        cmd_frame.data[5] = (uint8_t)(target_velocity >> 8);
-//        cmd_frame.data[6] = (uint8_t)(target_velocity >> 16);
-//        cmd_frame.data[7] = (uint8_t)(target_velocity >> 24);
-//        can_send(0, &cmd_frame);
-//
-//        // Вращаем мотор 3 секунды в одну сторону
-//        HAL_Delay(3000);
-//
-//        // Меняем направление
-//        target_velocity = -target_velocity;
-//
-//    /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   }
