@@ -1,4 +1,4 @@
 ../Core/Src/abstraction_layer.c:9:5:can_init	3
-../Core/Src/abstraction_layer.c:33:5:can_send	3
-../Core/Src/abstraction_layer.c:53:5:can_receive	3
-../Core/Src/abstraction_layer.c:71:6:can_close	1
+../Core/Src/abstraction_layer.c:35:5:can_send	3
+../Core/Src/abstraction_layer.c:55:5:can_receive	3
+../Core/Src/abstraction_layer.c:73:6:can_close	1

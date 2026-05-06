@@ -27,26 +27,32 @@ void PDO_Create_RxPDO(CAN_Frame *frame, uint8_t pdo_num, uint8_t node_id, const 
 
 int PDO_Parse_TxPDO(const CAN_Frame *frame, uint8_t *pdo_num, uint8_t *node_id, uint8_t *data, uint8_t *data_len)
 {
-    if (frame->id > 0x180 && frame->id < 0x1FF) {
+    // Проверяем диапазон TxPDO 1 (0x181 - 0x1FF)
+    if (frame->id >= 0x181 && frame->id <= 0x1FF) {
         *node_id = frame->id - 0x180;
         *pdo_num = 1;
     }
-    else if (frame->id > 0x280 && frame->id < 0x2FF) {
+    // Проверяем диапазон TxPDO 2 (0x281 - 0x2FF)
+    else if (frame->id >= 0x281 && frame->id <= 0x2FF) {
         *node_id = frame->id - 0x280;
         *pdo_num = 2;
     }
-    else if (frame->id > 0x380 && frame->id < 0x3FF) {
+    // Проверяем диапазон TxPDO 3 (0x381 - 0x3FF)
+    else if (frame->id >= 0x381 && frame->id <= 0x3FF) {
         *node_id = frame->id - 0x380;
         *pdo_num = 3;
     }
-    else if (frame->id > 0x480 && frame->id < 0x4FF) {
+    // Проверяем диапазон TxPDO 4 (0x481 - 0x4FF)
+    else if (frame->id >= 0x481 && frame->id <= 0x4FF) {
         *node_id = frame->id - 0x480;
         *pdo_num = 4;
     }
-    else
+    else {
         return 0; // Это не TxPDO-Frame
+    }
     
     *data_len = frame->dlc;
     memcpy(data, frame->data, *data_len);
+
     return 1;
 }

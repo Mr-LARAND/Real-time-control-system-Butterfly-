@@ -64,8 +64,11 @@ uint32_t TxMailbox = 0;
 uint8_t node_id_mcu = 5; // ID STM32F767ZI
 uint32_t last_heartbeat = 0;
 int32_t target_velocity = 0;
-uint32_t can_timer = 0;
+uint32_t can_timer_1 = 0;
+uint32_t can_timer_2 = 0;
 uint16_t motor_controlword = 0x000F;
+uint16_t old_controlword = 0;
+int32_t old_velocity = -1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -81,30 +84,71 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define CMD_SET_VELOCITY 0x01
+#define CMD_GET_TELEMETRY 0x02
+#define CMD_STOP 0x03
+#define CMD_START 0x04
+#define RESP_TELEMETRY 0x12
+
+
+int32_t current_position = 0;
+int32_t current_velocity = 0;
+int32_t current_torque= 0;
 
 // Эта функция автоматически вызывается lwIP, когда прилетает UDP пакет
 void udp_receive_callback(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
-    if (p != NULL) {
-        // Создаем временный буфер и копируем туда данные из пакета
-        char buffer[32] = {0};
-        uint16_t len = p->len < 31 ? p->len : 31;
-        strncpy(buffer, (char *)p->payload, len);
+    if (p != NULL)
+    {
+        uint8_t *data = (uint8_t *)p->payload;
+        uint16_t len = p->len;
 
-        if (strncmp(buffer, "CMD_STOP", 8) == 0) {
-        	motor_controlword = 0x0007; // Состояние "Switch On" (силовая часть выключена)
-            target_velocity = 0;
-        }
-        else if (strncmp(buffer, "CMD_START", 9) == 0) {
-        	motor_controlword = 0x000F; // Состояние "Enable Operation" (силовая часть включена)
-        	target_velocity = 0;
-        }
-        else {
-        	target_velocity = atoi(buffer);
-        	motor_controlword = 0x000F;
-        }
+        if (len >= 1) { // Пакет должен содержать хотя бы 1 байт (ID)
+            uint8_t cmd_id = data[0];
 
-        // Освобождаем память пакета, иначе STM32 зависнет от нехватки памяти
+            switch (cmd_id) {
+
+                case CMD_SET_VELOCITY:
+                    if (len >= 5) {
+                        // Читаем 4 байта скорости (int32_t), начиная с 1-го байта (смещение data+1)
+                        int32_t new_velocity;
+                        memcpy(&new_velocity, data + 1, sizeof(int32_t));
+
+                        target_velocity = new_velocity;
+                        motor_controlword = 0x000F; // Включаем мотор при получении скорости
+                    }
+                    break;
+
+                case CMD_GET_TELEMETRY:
+                {
+                    // Формируем ответный пакет: [ID(1)] + [Pos(4)] + [Vel(4)] + [Torque(4)] = 13 байт
+                    uint8_t resp_buffer[13];
+                    resp_buffer[0] = RESP_TELEMETRY;
+                    memcpy(resp_buffer + 1, &current_position, 4);
+                    memcpy(resp_buffer + 5, &current_velocity, 4);
+                    memcpy(resp_buffer + 9, &current_torque, 4);
+
+                    struct pbuf *p_out = pbuf_alloc(PBUF_TRANSPORT, 13, PBUF_RAM);
+                    if (p_out != NULL) {
+                        pbuf_take(p_out, resp_buffer, 13);
+                        udp_sendto(upcb, p_out, addr, port); // Отвечаем ноутбуку
+                        pbuf_free(p_out);
+                    }
+                    break;
+                }
+
+                case CMD_STOP:
+                    motor_controlword = 0x0007; // Switch On (Сила выкл)
+                    target_velocity = 0;
+                    break;
+
+                case CMD_START:
+                    motor_controlword = 0x000F; // Enable Operation (Сила вкл)
+                    target_velocity = 0;
+                    break;
+            }
+        }
+        // Освобождаем память входящего пакета!
         pbuf_free(p);
     }
 }
@@ -155,63 +199,134 @@ int main(void)
   MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
   udp_server_init();
+  if (can_init("can1") != 0) {
+	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+	  Error_Handler();
+  }
+  uint8_t epos_node_id = 7;
 
-  can_init("can1");
-  uint8_t epos_node_id = 1;
-  CAN_Frame my_frame = {0};
+  HAL_Delay(2000); // Ожидание загрузки EPOS2
 
-  HAL_Delay(2000);
+  // Переводим EPOS в PRE-OPERATIONAL
+  CAN_Frame nmt_frame = {0};
+  NMT_Create_Command(&nmt_frame, NMT_PRE_OPERATIONAL, epos_node_id);
+  can_send(0, &nmt_frame);
+  HAL_Delay(100);
 
-  // Переводим EPOS в Operational
-  NMT_Create_Command(&my_frame, NMT_OPERATIONAL, epos_node_id);
-  can_send(0, &my_frame);
-  HAL_Delay(50);
-
+  // Настраиваем все параметры через SDO
   CAN_Frame sdo_frame = {0};
   sdo_frame.id = 0x600 + epos_node_id;
   sdo_frame.dlc = 8;
 
-  // 2. Режим Profile Velocity (0x6060 = 3)
-  sdo_frame.data[0] = 0x2F; sdo_frame.data[1] = 0x60; sdo_frame.data[2] = 0x60; sdo_frame.data[3] = 0x00;
-  sdo_frame.data[4] = 0x03; sdo_frame.data[5] = 0x00; sdo_frame.data[6] = 0x00; sdo_frame.data[7] = 0x00;
+  // 2.1 Режим Profile Velocity
+  sdo_frame.data[0] = 0x2F;
+  sdo_frame.data[1] = 0x60;
+  sdo_frame.data[2] = 0x60;
+  sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x03;
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 2.1 Установка Profile Acceleration (0x6083) = 1000 (0x00002710)
-  sdo_frame.data[0] = 0x23; // Команда: Запись 4 байт
-  sdo_frame.data[1] = 0x83; // Индекс LSB
-  sdo_frame.data[2] = 0x60; // Индекс MSB
-  sdo_frame.data[3] = 0x00; // Субиндекс
-  sdo_frame.data[4] = 0xE8; // E8
-  sdo_frame.data[5] = 0x03; // 03
-  sdo_frame.data[6] = 0x00; // 00
-  sdo_frame.data[7] = 0x00; // 00
+  // 2.2 Ускорение 1000 и торможение 1000
+  sdo_frame.data[0] = 0x23;
+  sdo_frame.data[1] = 0x83;
+  sdo_frame.data[2] = 0x60;
+  sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0xE8;
+  sdo_frame.data[5] = 0x03;
+  sdo_frame.data[6] = 0x00;
+  sdo_frame.data[7] = 0x00;
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 2.2 Установка Profile Deceleration (0x6084) = 10000 (0x00002710)
-  sdo_frame.data[1] = 0x84; // Меняем только младший байт индекса на 0x84
+  sdo_frame.data[1] = 0x84; // Меняем на Deceleration
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 2.5 Сброс ошибок (Fault Reset): 0x6040 = 0x0080
-  sdo_frame.data[0] = 0x2B; sdo_frame.data[1] = 0x40; sdo_frame.data[2] = 0x60; sdo_frame.data[3] = 0x00;
-  sdo_frame.data[4] = 0x80; sdo_frame.data[5] = 0x00;
+  // НАСТРАИВАЕМ TxPDO 2 Parametr НА ОТПРАВКУ ПО SYNC
+
+
+  sdo_frame.data[0] = 0x23;
+  sdo_frame.data[1] = 0x01;
+  sdo_frame.data[2] = 0x18;
+  sdo_frame.data[3] = 0x01; // 0x1801, sub 1
+  sdo_frame.data[4] = 0x80;
+  sdo_frame.data[5] = 0x02;
+  sdo_frame.data[6] = 0x00;
+  sdo_frame.data[7] = 0x80;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // Настройка Mapping PDO 2
+  sdo_frame.data[0] = 0x2F;
+  sdo_frame.data[1] = 0x01;
+  sdo_frame.data[2] = 0x1A;
+  sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x00;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // Добавил Statusword
+  sdo_frame.data[0] = 0x23;
+  sdo_frame.data[1] = 0x01;
+  sdo_frame.data[2] = 0x1A;
+  sdo_frame.data[3] = 0x01;
+  sdo_frame.data[4] = 0x10;
+  sdo_frame.data[5] = 0x00;
+  sdo_frame.data[6] = 0x41;
+  sdo_frame.data[7] = 0x60;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // добавил позицию
+  sdo_frame.data[0] = 0x23;
+  sdo_frame.data[1] = 0x01;
+  sdo_frame.data[2] = 0x1A;
+  sdo_frame.data[3] = 0x02;
+  sdo_frame.data[4] = 0x20;
+  sdo_frame.data[5] = 0x00;
+  sdo_frame.data[6] = 0x64;
+  sdo_frame.data[7] = 0x60;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+  // включение для двух объектов
+  sdo_frame.data[0] = 0x2F;
+  sdo_frame.data[1] = 0x01;
+  sdo_frame.data[2] = 0x1A;
+  sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x02;
+  can_send(0, &sdo_frame);
+  HAL_Delay(50);
+
+
+  // Аналогично для скорости... (сделаю потом)
+
+
+  // Переводим EPOS в OPERATIONAL
+  NMT_Create_Command(&nmt_frame, NMT_OPERATIONAL, epos_node_id);
+  can_send(0, &nmt_frame);
+  HAL_Delay(100);
+
+  // Запускаем привод через автомат состояний
+  sdo_frame.data[0] = 0x2B;
+  sdo_frame.data[1] = 0x40;
+  sdo_frame.data[2] = 0x60;
+  sdo_frame.data[3] = 0x00;
+  sdo_frame.data[4] = 0x80;
+  sdo_frame.data[5] = 0x00; // Fault Reset
   can_send(0, &sdo_frame);
   HAL_Delay(100);
 
-  // 3. Шаг 1: Shutdown (0x6040 = 0x0006)
-  sdo_frame.data[4] = 0x06; sdo_frame.data[5] = 0x00;
+  sdo_frame.data[4] = 0x06; // Shutdown
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 4. Шаг 2: Switch On (0x6040 = 0x0007)
-  sdo_frame.data[4] = 0x07;
+  sdo_frame.data[4] = 0x07; // Switch On
   can_send(0, &sdo_frame);
   HAL_Delay(50);
 
-  // 5. Шаг 3: Enable Operation (0x6040 = 0x000F)
-  sdo_frame.data[4] = 0x0F;
+  sdo_frame.data[4] = 0x0F; // Enable Operation
   can_send(0, &sdo_frame);
   HAL_Delay(100);
   /* USER CODE END 2 */
@@ -222,9 +337,20 @@ int main(void)
   {
 	  MX_LWIP_Process();
 
-	  if (HAL_GetTick() - can_timer >= 100)
+	  if (HAL_GetTick() - can_timer_1 >= 10) {
+		  can_timer_1 = HAL_GetTick();
+
+		  CAN_Frame sync_frame = {0};
+          sync_frame.id = 0x080;
+          sync_frame.dlc = 0;
+          can_send(0, &sync_frame);
+
+          for(volatile int i = 0; i < 5000; i++);
+	  }
+
+	  if (HAL_GetTick() - can_timer_2 >= 100)
 	  {
-		  can_timer = HAL_GetTick();
+		  can_timer_2 = HAL_GetTick();
 
 		  CAN_Frame cmd_frame = {0};
 		  cmd_frame.id = 0x600 + epos_node_id;
@@ -494,7 +620,48 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    CAN_RxHeaderTypeDef rx_header;
+    uint8_t rx_data[8];
+
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data) == HAL_OK)
+    {
+    	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+        CAN_Frame frame = {0};
+        frame.id = rx_header.StdId;
+        frame.dlc = rx_header.DLC;
+        memcpy(frame.data, rx_data, frame.dlc);
+
+        uint8_t pdo_num = 0;
+        uint8_t node_id = 0;
+        uint8_t parsed_data[8] = {0};
+        uint8_t parsed_len = 0;
+
+        if (PDO_Parse_TxPDO(&frame, &pdo_num, &node_id, parsed_data, &parsed_len) == 1)
+        {
+            if (node_id == 7)
+            {
+                // TxPDO 2: [Statusword(2)] + [Actual Position(4)]
+                if (pdo_num == 2 && parsed_len >= 6)
+                {
+                    // 100% безопасный способ скопировать 4 байта в 32-битное число
+                    memcpy(&current_position, &parsed_data[2], sizeof(int32_t));
+                }
+                // TxPDO 3: [Statusword(2)] + [Actual Velocity(4)]
+                else if (pdo_num == 3 && parsed_len >= 6)
+                {
+                    memcpy(&current_velocity, &parsed_data[2], sizeof(int32_t));
+                }
+            }
+        }
+    }
+}
+
 /* USER CODE END 4 */
+
+
+
 
  /* MPU Configuration */
 
